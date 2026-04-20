@@ -7,60 +7,108 @@ import org.bukkit.event.Listener;
 import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitRunnable;
+import org.bukkit.util.Vector;
 import java.util.*;
 
 public class LadderFix extends JavaPlugin implements Listener {
     
+    private Set<UUID> onLadder = new HashSet<>();
     private Map<UUID, Location> lastLoc = new HashMap<>();
-    private Map<UUID, Integer> stuck = new HashMap<>();
+    private Map<UUID, Integer> stuckTicks = new HashMap<>();
     
     @Override
     public void onEnable() {
         Bukkit.getPluginManager().registerEvents(this, this);
         
+        // Периодическая помощь при подъёме
         new BukkitRunnable() {
             public void run() {
-                for (Player p : Bukkit.getOnlinePlayers()) {
-                    if (p.getLocation().getBlock().getType() == Material.LADDER) {
-                        if (p.getVelocity().getY() <= 0 && p.getLocation().getPitch() < -30) {
-                            p.setVelocity(p.getVelocity().setY(0.1));
-                        }
+                for (UUID uuid : onLadder) {
+                    Player p = Bukkit.getPlayer(uuid);
+                    if (p != null && p.isOnline() && !p.isDead()) {
+                        helpClimb(p);
                     }
                 }
             }
         }.runTaskTimer(this, 0L, 1L);
         
-        getLogger().info("LadderFix enabled!");
+        getLogger().info("LadderFix enabled - Fixed ladder climbing!");
     }
     
     @EventHandler
     public void onMove(PlayerMoveEvent e) {
         Player p = e.getPlayer();
         Location loc = p.getLocation();
+        Material block = loc.getBlock().getType();
+        Material blockBelow = loc.clone().subtract(0, 0.1, 0).getBlock().getType();
         
-        if (loc.getBlock().getType() != Material.LADDER) return;
+        // Проверяем, на лестнице ли игрок
+        boolean isOnLadderBlock = block == Material.LADDER || blockBelow == Material.LADDER;
         
-        Location last = lastLoc.get(p.getUniqueId());
-        if (last == null) {
-            lastLoc.put(p.getUniqueId(), loc.clone());
-            return;
-        }
-        
-        double dy = loc.getY() - last.getY();
-        double dx = Math.abs(loc.getX() - last.getX());
-        double dz = Math.abs(loc.getZ() - last.getZ());
-        
-        if ((dx > 0.01 || dz > 0.01) && dy < 0.001) {
-            int ticks = stuck.getOrDefault(p.getUniqueId(), 0) + 1;
-            stuck.put(p.getUniqueId(), ticks);
-            if (ticks >= 2) {
-                p.setVelocity(p.getVelocity().setY(0.08));
-                stuck.put(p.getUniqueId(), 0);
+        if (isOnLadderBlock) {
+            onLadder.add(p.getUniqueId());
+            
+            // Проверяем застревание
+            Location last = lastLoc.get(p.getUniqueId());
+            if (last != null) {
+                double dy = loc.getY() - last.getY();
+                double dx = Math.abs(loc.getX() - last.getX());
+                double dz = Math.abs(loc.getZ() - last.getZ());
+                
+                // Если игрок двигается горизонтально, но не вертикально = застрял
+                if ((dx > 0.01 || dz > 0.01) && Math.abs(dy) < 0.001) {
+                    int ticks = stuckTicks.getOrDefault(p.getUniqueId(), 0) + 1;
+                    stuckTicks.put(p.getUniqueId(), ticks);
+                    
+                    if (ticks >= 2) {
+                        // Даём толчок вверх
+                        p.setVelocity(new Vector(0, 0.15, 0));
+                        stuckTicks.put(p.getUniqueId(), 0);
+                    }
+                } else {
+                    stuckTicks.remove(p.getUniqueId());
+                }
             }
+            lastLoc.put(p.getUniqueId(), loc.clone());
+            
         } else {
-            stuck.remove(p.getUniqueId());
+            onLadder.remove(p.getUniqueId());
+            lastLoc.remove(p.getUniqueId());
+            stuckTicks.remove(p.getUniqueId());
         }
+    }
+    
+    private void helpClimb(Player p) {
+        Vector vel = p.getVelocity();
         
-        lastLoc.put(p.getUniqueId(), loc.clone());
+        // Если игрок на лестнице и пытается подняться
+        // W + взгляд вверх = подъём
+        if (isMovingForward(p) && p.getLocation().getPitch() < -30) {
+            p.setVelocity(new Vector(vel.getX(), 0.2, vel.getZ()));
+        }
+        // S + взгляд вниз = спуск
+        else if (isMovingBackward(p) && p.getLocation().getPitch() > 30) {
+            p.setVelocity(new Vector(vel.getX(), -0.2, vel.getZ()));
+        }
+        // Shift = спуск
+        else if (p.isSneaking()) {
+            p.setVelocity(new Vector(vel.getX(), -0.25, vel.getZ()));
+        }
+        // Просто стоит на лестнице — не падаем
+        else if (vel.getY() < 0 && !p.isOnGround()) {
+            p.setVelocity(new Vector(vel.getX(), 0, vel.getZ()));
+        }
+    }
+    
+    private boolean isMovingForward(Player p) {
+        Vector dir = p.getLocation().getDirection();
+        Vector vel = p.getVelocity();
+        return dir.getX() * vel.getX() + dir.getZ() * vel.getZ() > 0.03;
+    }
+    
+    private boolean isMovingBackward(Player p) {
+        Vector dir = p.getLocation().getDirection();
+        Vector vel = p.getVelocity();
+        return dir.getX() * vel.getX() + dir.getZ() * vel.getZ() < -0.03;
     }
 }
